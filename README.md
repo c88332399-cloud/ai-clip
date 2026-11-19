@@ -17,6 +17,9 @@ node --env-file=.env server.js
 npm test               # e2e без ключей: использует локальный мок Gemini
 ```
 
+## yt-dlp
+Устанавливается при каждой сборке: в Docker — официальный standalone-файл в `/usr/local/bin/yt-dlp` (сборка падает, если он не запускается); в обычном Node-окружении `npm install` запускает `scripts/install-bin.mjs`, который кладёт его в `./bin/yt-dlp`. Сервер при старте проверяет версию (в логе: `yt-dlp <версия> (<путь>)`), статус виден в `GET /api/config` → `ytdlp`.
+
 ## Render
 Тип сервиса — **Docker** (Dockerfile в корне). Переменная `GEMINI_API_KEY` в Environment. Для сохранения проектов после перезапуска — Persistent Disk на `/data` (платный план). См. render.yaml.
 

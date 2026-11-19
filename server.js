@@ -10,6 +10,7 @@ import * as yt from './lib/youtube.js';
 import * as pipe from './lib/pipeline.js';
 import { zipTo } from './lib/zip.js';
 import * as remote from './lib/remote.js';
+import * as ytdlp from './lib/ytdlp.js';
 import { groups, groupText } from './lib/subs.js';
 
 const PUB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
@@ -79,15 +80,15 @@ async function route(req, res, url) {
   if (seg[0] !== 'api') return staticFile(req, res, url);
   const a = seg[1], id = seg[2], sub = seg[3];
 
-  if (a === 'config' && m === 'GET') return send(res, 200, { maxUploadMb: Math.round(C.maxUploadBytes / 1048576), maxQuality: C.maxQuality, capabilities: { speech: !!C.geminiKey, analysis: !!C.geminiKey, youtube: C.ytdlp, directLinks: true }, missing: missingKeys() });
+  if (a === 'config' && m === 'GET') return send(res, 200, { maxUploadMb: Math.round(C.maxUploadBytes / 1048576), maxQuality: C.maxQuality, capabilities: { speech: !!C.geminiKey, analysis: !!C.geminiKey, youtube: ytdlp.state.available, directLinks: true }, ytdlp: { available: ytdlp.state.available, version: ytdlp.state.version, error: ytdlp.state.available ? null : ytdlp.state.error }, missing: missingKeys() });
   if (a === 'sources' && !id && m === 'POST') {
     const { url: u0 } = await readBody(req), u = String(u0 || '').trim();
     if (!/^https?:\/\//i.test(u)) throw new HttpError(400, 'Вставьте ссылку, начинающуюся с http:// или https://');
     await needSpace();
     if (yt.isYoutube(u)) {
-      const md = await yt.meta(u);
+      const cu = yt.canonical(u), md = await yt.meta(cu);
       if (md.duration > C.maxSourceSec) throw new HttpError(400, `Видео длиннее лимита сервера (${Math.round(C.maxSourceSec / 60)} мин).`);
-      const s = { id: store.newId(), owner: uid, kind: 'youtube', url: u, createdAt: Date.now(), ...md }; store.saveSource(s);
+      const s = { id: store.newId(), owner: uid, kind: 'youtube', url: cu, createdAt: Date.now(), ...md }; store.saveSource(s);
       return send(res, 200, pubSource(s));
     }
     // прямая ссылка на видеофайл
@@ -186,6 +187,7 @@ export const server = http.createServer(async (req, res) => {
   catch (e) { if (res.headersSent) return res.end(); const st = e.status || 500; if (st === 500) console.error(e); send(res, st, { error: st === 500 ? 'Внутренняя ошибка сервера' : e.message }); }
 });
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await ytdlp.init(); console.log(ytdlp.state.available ? `yt-dlp ${ytdlp.state.version} (${ytdlp.state.bin})` : `yt-dlp НЕ НАЙДЕН: ${ytdlp.state.error}`);
   pipe.recover(); store.cleanup(); setInterval(store.cleanup, 3600e3).unref();
   server.requestTimeout = 0; server.listen(C.port, () => console.log(`AI Clip Maker: http://localhost:${C.port}  | ключи отсутствуют: ${missingKeys().join(', ') || 'нет'}`));
 }
