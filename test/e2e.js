@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'acm-'));
-Object.assign(process.env, { DATA_DIR: path.join(tmp, 'data'), PORT: '3999', GEMINI_API_KEY: 'test', GEMINI_BASE_URL: 'http://localhost:4010', ALLOW_PRIVATE_URLS: 'true', MIN_FREE_GB: '0.01' });
+Object.assign(process.env, { DATA_DIR: path.join(tmp, 'data'), PORT: '3999', GEMINI_API_KEY: 'test', GEMINI_BASE_URL: 'http://localhost:4010', ALLOW_PRIVATE_URLS: 'true', YT_DLP_BIN: path.resolve('test/fake-ytdlp.sh'), FAKE_LOG: path.join(tmp, 'ytdlp.log'), MIN_FREE_GB: '0.01' });
 const { startMock } = await import('./mock-ai.js');
 await startMock(4010);
 const { server } = await import('../server.js');
@@ -11,6 +11,7 @@ await new Promise(r => server.listen(3999, r));
 const B = 'http://localhost:3999', ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) process.exitCode = 1; };
 const video = path.join(tmp, 'in.mp4');
 execSync(`ffmpeg -y -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 -t 90 -pix_fmt yuv420p -shortest ${video}`);
+process.env.FAKE_VIDEO = video;
 let cookie = '';
 const api = async (p, o = {}, ck = cookie) => { const r = await fetch(B + '/api' + p, { ...o, headers: { ...(o.headers || {}), cookie: ck } }); const sc = r.headers.get('set-cookie'); if (sc && !cookie) cookie = sc.split(';')[0]; return r; };
 const post = (p, b, ck) => api(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }, ck);
@@ -66,4 +67,13 @@ for (let i = 0; i < 90; i++) { p2 = await (await api('/projects/' + p2id)).json(
 ok(p2.status === 'done' && p2.clips.length === 1, 'проект с переводом субтитров (lang=en) завершён: ' + (p2.error || p2.status));
 r = await api('/projects/' + p2id, { method: 'DELETE' }); ok(r.status === 200 && !fs.existsSync(path.join(tmp, 'data', 'projects', p2id)), 'удаление проекта чистит диск');
 r = await api('/clips/' + p.clips[1].id, { method: 'DELETE' }); const after = await (await api('/projects/' + pid)).json(); ok(after.clips.length === 2 && after.clips.every(c => c.status === 'ready'), 'удаление клипа не затрагивает остальные');
+// --- YouTube-ветка через yt-dlp (интеграция нашего кода с внешним бинарником; сам yt-dlp здесь заменён заглушкой) ---
+await (await import('../lib/ytdlp.js')).init();
+cfg2: { const c = await (await api('/config')).json(); ok(c.ytdlp.available && c.ytdlp.version === '2099.01.01-test' && c.capabilities.youtube, `config: yt-dlp найден, версия ${c.ytdlp.version}`); }
+r = await post('/sources', { url: 'https://youtube.com.evil.example/watch?v=abcdefghijk' }); ok(r.status >= 400, 'sources: поддельный хост youtube.com.evil… отклонён');
+r = await post('/sources', { url: 'https://youtu.be/abcdefghijk?x=--exec%20touch%20pwned' }); const ys = await r.json(); ok(r.status === 200 && ys.title === 'Fake YT video', 'sources: YouTube-ссылка принята, метаданные получены через yt-dlp');
+r = await post('/projects', { ...settings, sourceId: ys.id, count: 1, duration: '15-30', subs: { ...settings.subs, on: false } }); const yp = (await r.json()).id; let ypr;
+for (let i = 0; i < 90; i++) { ypr = await (await api('/projects/' + yp)).json(); if (['done', 'partial', 'failed'].includes(ypr.status)) break; await new Promise(r => setTimeout(r, 1000)); }
+ok(ypr.status === 'done' && ypr.clips[0]?.status === 'ready', 'YouTube-проект: yt-dlp скачал файл → FFmpeg создал клип: ' + (ypr.error || ypr.status));
+const log = fs.readFileSync(path.join(tmp, 'ytdlp.log'), 'utf8'); ok(!log.includes('pwned') && log.includes('-- https://www.youtube.com/watch?v=abcdefghijk') && !log.includes('exec'), 'yt-dlp получает только каноническую ссылку после "--" (без инъекции опций)');
 console.log('tmp:', tmp); server.close(); process.exit(process.exitCode || 0);
