@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ai-clip-maker
+    runtime: docker
+    plan: standard          # нужен платный план: Persistent Disk + ресурсы под FFmpeg
+    disk: { name: data, mountPath: /data, sizeGB: 30 }
+    healthCheckPath: /api/config
+    envVars:
+      - { key: OPENAI_API_KEY, sync: false }
+      - { key: ANTHROPIC_API_KEY, sync: false }
+      - { key: DATA_DIR, value: /data }
+      - { key: MAX_CONCURRENT_JOBS, value: "1" }
