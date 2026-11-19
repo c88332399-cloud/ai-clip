@@ -9,6 +9,8 @@ import * as media from './lib/media.js';
 import * as yt from './lib/youtube.js';
 import * as pipe from './lib/pipeline.js';
 import { zipTo } from './lib/zip.js';
+import * as remote from './lib/remote.js';
+import { groups, groupText } from './lib/subs.js';
 
 const PUB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
@@ -37,7 +39,7 @@ function serveFile(req, res, file, type, dlName) {
   res.writeHead(200, { ...h, 'Content-Length': st.size }); fs.createReadStream(file).pipe(res);
 }
 
-const ENUM = { count: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15], duration: ['auto', '15-30', '30-60', '60-90', '90-180'], format: ['9:16', '1:1', '16:9'], quality: [720, 1080, 1440, 2160], moments: ['auto', 'best', 'funny', 'surprise', 'emotion', 'ideas', 'tips', 'debate', 'mix'] };
+const ENUM = { count: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15], duration: ['auto', '15', '30', '45', '60', '90', '15-30', '30-60', '60-90', '90-180'], format: ['9:16', '1:1', '16:9'], quality: [720, 1080, 1440, 2160], moments: ['auto', 'best', 'funny', 'surprise', 'emotion', 'ideas', 'tips', 'debate', 'mix'] };
 function validateSettings(b) {
   const bad = k => new HttpError(400, `Некорректное значение параметра «${k}»`);
   const s = { count: +b.count, duration: String(b.duration), format: String(b.format), quality: +b.quality, moments: String(b.moments) };
@@ -47,6 +49,8 @@ function validateSettings(b) {
     color: /^#[0-9a-f]{6}$/i.test(u.color) ? u.color : '#FFFFFF', outline: u.outline !== false, pos: ['bottom', 'center', 'top'].includes(u.pos) ? u.pos : 'bottom', anim: ['none', 'pop', 'word', 'fade'].includes(u.anim) ? u.anim : 'none', highlight: !!u.highlight, style: String(u.style || '').slice(0, 20) };
   return s;
 }
+const hits = new Map();
+function rateLimit(uid) { const now = Date.now(), a = (hits.get(uid) || []).filter(t => now - t < 3600e3); if (a.length >= C.maxProjectsPerHour) throw new HttpError(429, 'Слишком много запусков за час. Попробуйте позже.'); a.push(now); hits.set(uid, a); }
 function own(req, res, uid, pid) { const p = store.getProject(pid); if (!p || p.owner !== uid) throw new HttpError(404, 'Проект не найден'); return p; }
 function clipOf(uid, cid) { const [pid, id] = String(cid).split('.'); const p = store.getProject(pid); const c = p && p.owner === uid && p.clips.find(x => x.id === id); if (!c) throw new HttpError(404, 'Клип не найден'); return [p, c]; }
 const clipPath = (p, c, ext) => path.join(store.pdir(p.id), 'clips', c.id + ext);
@@ -75,16 +79,29 @@ async function route(req, res, url) {
   if (seg[0] !== 'api') return staticFile(req, res, url);
   const a = seg[1], id = seg[2], sub = seg[3];
 
-  if (a === 'config' && m === 'GET') return send(res, 200, { maxUploadMb: Math.round(C.maxUploadBytes / 1048576), maxQuality: C.maxQuality, capabilities: { speech: !!C.openaiKey, analysis: !!C.anthropicKey, youtube: C.ytdlp }, missing: missingKeys() });
+  if (a === 'config' && m === 'GET') return send(res, 200, { maxUploadMb: Math.round(C.maxUploadBytes / 1048576), maxQuality: C.maxQuality, capabilities: { speech: !!C.geminiKey, analysis: !!C.geminiKey, youtube: C.ytdlp, directLinks: true }, missing: missingKeys() });
   if (a === 'sources' && !id && m === 'POST') {
-    const { url: u } = await readBody(req);
-    if (!yt.isYoutube(String(u || '').trim())) throw new HttpError(400, 'Нужна ссылка вида youtube.com/watch?v=… или youtu.be/…');
+    const { url: u0 } = await readBody(req), u = String(u0 || '').trim();
+    if (!/^https?:\/\//i.test(u)) throw new HttpError(400, 'Вставьте ссылку, начинающуюся с http:// или https://');
     await needSpace();
-    const md = await yt.meta(u.trim());
-    if (md.duration > C.maxSourceSec) throw new HttpError(400, `Видео длиннее лимита сервера (${Math.round(C.maxSourceSec / 60)} мин).`);
-    const s = { id: store.newId(), owner: uid, kind: 'youtube', url: u.trim(), createdAt: Date.now(), ...md }; store.saveSource(s);
-    return send(res, 200, pubSource(s));
+    if (yt.isYoutube(u)) {
+      const md = await yt.meta(u);
+      if (md.duration > C.maxSourceSec) throw new HttpError(400, `Видео длиннее лимита сервера (${Math.round(C.maxSourceSec / 60)} мин).`);
+      const s = { id: store.newId(), owner: uid, kind: 'youtube', url: u, createdAt: Date.now(), ...md }; store.saveSource(s);
+      return send(res, 200, pubSource(s));
+    }
+    // прямая ссылка на видеофайл
+    const id2 = store.newId(), dir = store.sdir(id2); fs.mkdirSync(dir, { recursive: true });
+    try {
+      const d = await remote.downloadDirect(u, dir);
+      let info; try { info = await media.probe(path.join(dir, d.file)); } catch { throw new HttpError(422, 'Файл по ссылке не удалось прочитать как видео. Проверьте формат или загрузите файл.'); }
+      if (info.duration > C.maxSourceSec) throw new HttpError(400, `Видео длиннее лимита сервера (${Math.round(C.maxSourceSec / 60)} мин).`);
+      await media.thumb(path.join(dir, d.file), path.join(dir, 'thumb.jpg'), info.duration * 0.1).catch(() => {});
+      const s = { id: id2, owner: uid, kind: 'upload', title: d.name, file: d.file, createdAt: Date.now(), ...info }; store.saveSource(s);
+      return send(res, 200, pubSource(s));
+    } catch (e) { fs.rmSync(dir, { recursive: true, force: true }); throw e; }
   }
+  if (a === 'sources' && id && sub === 'file' && m === 'GET') { const s = store.getSource(id); if (!s || s.owner !== uid || !s.file) throw new HttpError(404, 'Не найдено'); return serveFile(req, res, path.join(store.sdir(id), s.file), 'video/mp4'); }
   if (a === 'sources' && id && sub === 'thumb') { const s = store.getSource(id); if (!s || s.owner !== uid) throw new HttpError(404, 'Не найдено'); return serveFile(req, res, path.join(store.sdir(id), 'thumb.jpg'), 'image/jpeg'); }
   if (a === 'uploads' && m === 'POST') return upload(req, res, uid, url);
 
@@ -94,6 +111,7 @@ async function route(req, res, url) {
       const b = await readBody(req), s = validateSettings(b), src = store.getSource(String(b.sourceId));
       if (!src || src.owner !== uid) throw new HttpError(404, 'Источник не найден — подтвердите ссылку или загрузите файл заново');
       const miss = missingKeys(); if (miss.length) throw new HttpError(503, 'На сервере не настроены ключи: ' + miss.join(', ') + '. См. .env.example.');
+      rateLimit(uid);
       await needSpace();
       const p = store.createProject({ id: store.newId(), owner: uid, sourceId: src.id, title: src.title, createdAt: Date.now(), status: 'queued', stage: 0, progress: 0, ready: 0, total: s.count, notice: '', error: null, settings: s, source: pubSource(src), clips: [] });
       pipe.schedule(p); return send(res, 201, { id: p.id });
@@ -124,7 +142,7 @@ async function route(req, res, url) {
 
   if (a === 'clips' && id) {
     const [p, c] = clipOf(uid, id);
-    if (!sub && m === 'GET') return send(res, 200, store.publicProject({ ...p, clips: [c] }).clips[0]);
+    if (!sub && m === 'GET') return send(res, 200, { ...store.publicProject({ ...p, clips: [c] }).clips[0], sourceId: p.sourceId, sourceDuration: store.getSource(p.sourceId)?.duration });
     if (!sub && m === 'DELETE') {
       for (const e of ['.mp4', '.jpg']) fs.rmSync(clipPath(p, c, e), { force: true });
       const clips = p.clips.filter(x => x !== c); store.update(p, { clips, total: clips.length, status: clips.length && clips.every(x => x.status === 'ready') ? 'done' : p.status });
@@ -133,6 +151,12 @@ async function route(req, res, url) {
     if (sub === 'file' && m === 'GET') { if (c.status !== 'ready') throw new HttpError(404, 'Клип ещё не готов'); return serveFile(req, res, clipPath(p, c, '.mp4'), 'video/mp4', url.searchParams.has('dl') ? `clip_${num(c.index)}.mp4` : null); }
     if (sub === 'dl' && m === 'GET') { if (c.status !== 'ready') throw new HttpError(404, 'Клип ещё не готов'); return serveFile(req, res, clipPath(p, c, '.mp4'), 'video/mp4', `clip_${num(c.index)}.mp4`); }
     if (sub === 'thumb' && m === 'GET') return serveFile(req, res, clipPath(p, c, '.jpg'), 'image/jpeg');
+    if (sub === 'subs' && m === 'GET') {
+      const st = +url.searchParams.get('start'), en = +url.searchParams.get('end'), wide = url.searchParams.get('format') === '16:9';
+      if (!(st >= 0 && en > st)) throw new HttpError(400, 'Некорректные границы клипа');
+      const tr = store.readJson(p, 'transcript.json'); if (!tr) throw new HttpError(404, 'Транскрипция недоступна');
+      const G = groups(tr, st, en, wide ? 40 : 22); return send(res, 200, G.map(g => ({ start: +g.start.toFixed(2), end: +g.end.toFixed(2), text: groupText(g) })));
+    }
     if (sub === 'export' && m === 'POST') {
       if (c.status === 'processing') throw new HttpError(409, 'Клип уже экспортируется');
       const b = await readBody(req), src = store.getSource(p.sourceId), dur = src?.duration || Infinity;
@@ -141,7 +165,8 @@ async function route(req, res, url) {
       if (end - start < 1 || end - start > 600) throw new HttpError(400, 'Длительность клипа должна быть от 1 секунды до 10 минут');
       if (!ENUM.format.includes(b.format)) throw new HttpError(400, 'Некорректный формат');
       await needSpace();
-      pipe.scheduleExport(p, c, { start, end: Math.min(end, dur), format: b.format, crop: ['auto', 'center', 'left', 'right'].includes(b.crop) ? b.crop : 'auto', subs: !!b.subs });
+      const lines = Array.isArray(b.lines) && b.lines.length ? b.lines.slice(0, 500).map(x => String(x).slice(0, 300)) : null;
+      pipe.scheduleExport(p, c, { start, end: Math.min(end, dur), format: b.format, crop: ['auto', 'center', 'left', 'right'].includes(b.crop) ? b.crop : 'auto', subs: !!b.subs, lines });
       return send(res, 202, { ok: true });
     }
   }
@@ -156,6 +181,7 @@ function staticFile(req, res, url) {
 }
 
 export const server = http.createServer(async (req, res) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'same-origin'); res.setHeader('X-Frame-Options', 'DENY');
   try { await route(req, res, new URL(req.url, 'http://x')); }
   catch (e) { if (res.headersSent) return res.end(); const st = e.status || 500; if (st === 500) console.error(e); send(res, st, { error: st === 500 ? 'Внутренняя ошибка сервера' : e.message }); }
 });

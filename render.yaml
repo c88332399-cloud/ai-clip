@@ -1,12 +1,13 @@
 services:
   - type: web
     name: ai-clip-maker
-    runtime: docker
-    plan: standard          # нужен платный план: Persistent Disk + ресурсы под FFmpeg
-    disk: { name: data, mountPath: /data, sizeGB: 30 }
+    runtime: docker            # обязательно Docker: в образе есть FFmpeg и yt-dlp (в обычном Node-окружении Render FFmpeg нет)
+    plan: starter              # минимальный платный план; Persistent Disk на бесплатном плане недоступен
+    disk: { name: data, mountPath: /data, sizeGB: 10 }
     healthCheckPath: /api/config
     envVars:
-      - { key: OPENAI_API_KEY, sync: false }
-      - { key: ANTHROPIC_API_KEY, sync: false }
+      - { key: GEMINI_API_KEY, sync: false }   # уже задан у вас в Render — значение не хранится в репозитории
       - { key: DATA_DIR, value: /data }
       - { key: MAX_CONCURRENT_JOBS, value: "1" }
+      - { key: MAX_UPLOAD_MB, value: "1024" }
+      - { key: MAX_OUTPUT_QUALITY, value: "1080" }
