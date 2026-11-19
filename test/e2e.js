@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'acm-'));
-Object.assign(process.env, { DATA_DIR: path.join(tmp, 'data'), PORT: '3999', OPENAI_API_KEY: 'test', ANTHROPIC_API_KEY: 'test', OPENAI_BASE_URL: 'http://localhost:4010/v1', ANTHROPIC_BASE_URL: 'http://localhost:4010', MIN_FREE_GB: '0.01' });
+Object.assign(process.env, { DATA_DIR: path.join(tmp, 'data'), PORT: '3999', GEMINI_API_KEY: 'test', GEMINI_BASE_URL: 'http://localhost:4010', ALLOW_PRIVATE_URLS: 'true', MIN_FREE_GB: '0.01' });
 const { startMock } = await import('./mock-ai.js');
 await startMock(4010);
 const { server } = await import('../server.js');
@@ -19,12 +19,18 @@ let r = await api('/config'); const cfg = await r.json(); ok(cfg.capabilities.sp
 r = await api('/uploads?name=my%20video.mp4', { method: 'POST', headers: { 'content-type': 'video/mp4' }, body: fs.readFileSync(video) });
 const src = await r.json(); ok(r.status === 200 && src.width === 1280 && Math.round(src.duration) === 90, `upload + ffprobe: ${src.width}x${src.height}, ${src.duration}s`);
 r = await api('/uploads?name=bad.mp4', { method: 'POST', body: Buffer.from('not a video') }); ok(r.status === 400, 'upload: невидео отклонён (400)');
-r = await post('/sources', { url: 'https://example.com/x' }); ok(r.status === 400, 'sources: не-YouTube ссылка отклонена');
+r = await post('/sources', { url: 'ftp://example.com/x' }); ok(r.status === 400, 'sources: не-http ссылка отклонена');
+// прямая ссылка на видеофайл (локальный http-сервер)
+const fsrv = (await import('node:http')).createServer((q, w) => { if (q.url === '/v.mp4') { w.writeHead(200, { 'content-type': 'video/mp4' }); w.end(fs.readFileSync(video)); } else { w.writeHead(200, { 'content-type': 'text/html' }); w.end('<html></html>'); } }); await new Promise(r => fsrv.listen(4020, r));
+r = await post('/sources', { url: 'http://localhost:4020/v.mp4' }); const ds = await r.json(); ok(r.status === 200 && ds.width === 1280 && Math.round(ds.duration) === 90, `sources: прямая ссылка на .mp4 скачана и прочитана (${ds.width}x${ds.height})`);
+r = await post('/sources', { url: 'http://localhost:4020/page' }); ok(r.status === 422, 'sources: ссылка на HTML-страницу отклонена');
+r = await api(`/sources/${ds.id}/file`, { headers: { range: 'bytes=0-9' } }); ok(r.status === 206, 'sources: исходник доступен для предпросмотра (Range)');
+fsrv.close();
 r = await post('/projects', { sourceId: src.id, count: 99, duration: 'auto', format: '9:16', quality: 1080, moments: 'best', subs: {} }); ok(r.status === 400, 'projects: count=99 отклонён');
 
 const events = []; const ctl = new AbortController();
 const sse = fetch(B + '/api/projects/PLACEHOLDER/events', { signal: ctl.signal }).catch(() => {});
-const settings = { sourceId: src.id, count: 3, duration: '15-30', format: '9:16', quality: 1080, moments: 'best', subs: { on: true, srcLang: 'auto', lang: 'ru', size: 'L', font: 'Arial', color: '#FFFFFF', outline: true, pos: 'bottom', anim: 'pop', highlight: true, style: 'bold' } };
+const settings = { sourceId: src.id, count: 3, duration: '15-30', format: '9:16', quality: 1080, moments: 'best', subs: { on: true, srcLang: 'auto', lang: 'auto', size: 'L', font: 'Arial', color: '#FFFFFF', outline: true, pos: 'bottom', anim: 'pop', highlight: true, style: 'bold' } };
 r = await post('/projects', settings); const { id: pid } = await r.json(); ok(r.status === 201 && pid, 'projects: создан ' + pid);
 const sr = await fetch(`${B}/api/projects/${pid}/events`, { headers: { cookie }, signal: ctl.signal });
 (async () => { const rd = sr.body.getReader(), dec = new TextDecoder(); try { for (;;) { const { value, done } = await rd.read(); if (done) break; for (const l of dec.decode(value).split('\n')) if (l.startsWith('data: ')) { const p = JSON.parse(l.slice(6)); events.push([p.stage, p.progress]); } } } catch {} })();
@@ -50,8 +56,12 @@ const c1 = p.clips[0]; r = await post(`/clips/${c1.id}/export`, { start: c1.star
 let cc; for (let i = 0; i < 60; i++) { cc = await (await api('/clips/' + c1.id)).json(); if (cc.status !== 'processing') break; await new Promise(r => setTimeout(r, 500)); }
 const f2 = path.join(tmp, 'e.mp4'); fs.writeFileSync(f2, Buffer.from(await (await api(`/clips/${c1.id}/dl`)).arrayBuffer())); const v2 = JSON.parse(execSync(`ffprobe -v error -print_format json -show_streams ${f2}`)).streams.find(s => s.codec_type === 'video');
 ok(cc.status === 'ready' && v2.width === v2.height, `повторный экспорт 1:1: ${v2.width}x${v2.height}`);
+r = await api(`/clips/${c1.id}/subs?start=${c1.start}&end=${c1.end}&format=9:16`); const sl = await r.json(); ok(r.status === 200 && sl.length > 0 && sl[0].text, `subs: получены ${sl.length} строк субтитров для редактора`);
+r = await post(`/clips/${c1.id}/export`, { start: c1.start, end: c1.end, format: '9:16', subs: true, crop: 'auto', lines: sl.map((_, i) => 'Моя строка ' + (i + 1)) }); ok(r.status === 202, 'export: с отредактированными субтитрами принят');
+for (let i = 0; i < 60; i++) { cc = await (await api('/clips/' + c1.id)).json(); if (cc.status !== 'processing') break; await new Promise(r => setTimeout(r, 500)); }
+ok(cc.status === 'ready', 'export: клип с отредактированными субтитрами создан');
 // перевод субтитров
-r = await post('/projects', { ...settings, count: 1, subs: { ...settings.subs, lang: 'en', anim: 'word' } }); const p2id = (await r.json()).id; let p2;
+r = await post('/projects', { ...settings, duration: '30', count: 1, subs: { ...settings.subs, lang: 'en', anim: 'word' } }); const p2id = (await r.json()).id; let p2;
 for (let i = 0; i < 90; i++) { p2 = await (await api('/projects/' + p2id)).json(); if (['done', 'partial', 'failed'].includes(p2.status)) break; await new Promise(r => setTimeout(r, 1000)); }
 ok(p2.status === 'done' && p2.clips.length === 1, 'проект с переводом субтитров (lang=en) завершён: ' + (p2.error || p2.status));
 r = await api('/projects/' + p2id, { method: 'DELETE' }); ok(r.status === 200 && !fs.existsSync(path.join(tmp, 'data', 'projects', p2id)), 'удаление проекта чистит диск');
