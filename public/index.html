@@ -1,1 +1,228 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>AI Clip Maker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!--
+API-КОНТРАКТ (frontend ходит только на same-origin /api, ключей здесь нет):
+GET  /api/config                      -> {maxUploadMb?}
+POST /api/sources {url}               -> {id,title,duration,width,height,thumbnail?} | 4xx {error}
+POST /api/uploads (multipart "file")  -> {id,title,duration,width,height}
+POST /api/projects {sourceId,count,duration,format,quality,moments,subs} -> {id}
+GET  /api/projects                    -> [{id,title,createdAt,status,clipCount}]
+GET  /api/projects/:id                -> {id,title,status:queued|running|done|partial|failed,stage:1..7,progress:0..100,ready,total,notice?,error?,source?,clips:[Clip]}
+GET  /api/projects/:id/events         -> SSE, каждое сообщение = JSON проекта
+POST /api/projects/:id/retry | DELETE /api/projects/:id | GET /api/projects/:id/zip
+Clip {id,index,title,start,end,duration,score,status:ready|processing|failed,error?,format,subs}
+GET  /api/clips/:id (Clip) | /api/clips/:id/file (mp4) | /api/clips/:id/thumb | DELETE /api/clips/:id
+POST /api/clips/:id/export {start,end,format,subs,crop}
+-->
+<style>
+:root{--bg:#080D0A;--bg2:#0D1510;--card:#111C15;--surf:#17251B;--ac:#20D978;--ac2:#35E995;--tx:#F2F7F3;--mut:#8A9C90;--bd:#26372B;--err:#ff7a7a;color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:inherit}body{margin:0;background:var(--bg);color:var(--tx);font:400 15px/1.5 Onest,system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);background:var(--bg);z-index:10}
+button,input,select{font:inherit;color:inherit}a{color:inherit;text-decoration:none}
+:focus-visible{outline:2px solid var(--ac2);outline-offset:2px}
+header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;display:flex;align-items:center;gap:6px;padding:12px 16px;background:rgba(8,13,10,.88);backdrop-filter:blur(10px);border-bottom:1px solid var(--bd)}
+.logo{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:-.01em;margin-right:auto;cursor:pointer;background:none;border:0;padding:0}
+.logo i{width:22px;height:22px;border-radius:7px;background:var(--ac);box-shadow:0 0 18px rgba(32,217,120,.5);display:block;position:relative}
+.logo i::after{content:"";position:absolute;left:5px;right:5px;top:10px;height:2px;background:var(--bg)}
+nav button{background:none;border:0;color:var(--mut);padding:8px 10px;border-radius:8px;cursor:pointer}nav button:hover,nav button.on{color:var(--tx)}
+main{max-width:880px;margin:0 auto;padding:20px 16px 64px}
+.in{animation:in .28s ease-out}@keyframes in{from{opacity:0;transform:translateY(8px)}}
+h1{font-size:clamp(28px,6vw,44px);line-height:1.1;letter-spacing:-.025em;margin:0 0 14px;font-weight:700}
+h2{font-size:17px;margin:0 0 4px;font-weight:600}.mut{color:var(--mut)}.sm{font-size:13px}
+.btn{background:var(--ac);color:#04100a;border:0;border-radius:12px;padding:12px 20px;font-weight:600;cursor:pointer;box-shadow:0 0 0 rgba(32,217,120,0);transition:box-shadow .2s,transform .1s,background .2s;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.btn:hover{background:var(--ac2);box-shadow:0 0 24px rgba(32,217,120,.35)}.btn:active{transform:scale(.97)}
+.btn.big{padding:16px 28px;font-size:16px;border-radius:14px}.btn.g{background:var(--surf);color:var(--tx);border:1px solid var(--bd);box-shadow:none}.btn.g:hover{border-color:var(--ac)}
+.btn.s{padding:8px 12px;font-size:13px;border-radius:9px}.btn[disabled]{opacity:.45;pointer-events:none}.btn.arm{border-color:var(--err);color:var(--err)}
+.hero{padding:32px 0 8px;text-align:center}.hero p{max-width:460px;margin:0 auto 26px;color:var(--mut)}
+.strip{display:flex;gap:0;max-width:420px;height:46px;margin:34px auto 0;animation:sp 5s ease-in-out infinite}
+.strip b{display:block;border-radius:5px;background:var(--ac);height:100%;opacity:.9;animation:sg 5s ease-in-out infinite;animation-delay:calc(var(--i)*.12s)}
+.strip b:nth-child(even){background:var(--ac2)}
+@keyframes sp{0%,15%{gap:0}45%,75%{gap:10px}100%{gap:0}}
+@keyframes sg{0%,15%{transform:none;border-radius:2px}45%,75%{transform:translateY(calc((var(--i) - 2) * -3px)) scaleY(1.25);border-radius:7px;box-shadow:0 0 14px rgba(32,217,120,.5)}100%{transform:none;border-radius:2px}}
+.blk{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:18px;margin-bottom:12px}
+.blk>.hd{display:flex;gap:10px;align-items:baseline;margin-bottom:12px}.hd em{font-style:normal;color:var(--ac);font-weight:600}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.chip{background:var(--surf);border:1px solid var(--bd);border-radius:999px;padding:8px 15px;cursor:pointer;transition:border-color .15s,background .15s}
+.chip:hover{border-color:var(--ac)}.chip.on{background:rgba(32,217,120,.14);border-color:var(--ac);color:var(--ac2)}.chip[disabled]{opacity:.35;pointer-events:none}
+.num{min-width:46px;text-align:center;padding:10px 0;border-radius:11px}
+input[type=text],input[type=url],select{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:11px 12px;width:100%}
+input:focus,select:focus{border-color:var(--ac);outline:0}
+.f{display:flex;gap:8px}.f input{flex:1;min-width:0}
+.msg{margin-top:10px;font-size:13px;color:var(--err)}.msg.ok{color:var(--ac2)}
+.src{display:flex;gap:12px;margin-top:12px;background:var(--surf);border-radius:12px;padding:10px;align-items:center}
+.src img{width:96px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:var(--bg2)}
+.bar{height:6px;border-radius:9px;background:var(--surf);overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;width:0;background:var(--ac);box-shadow:0 0 12px var(--ac);transition:width .4s}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.clip{background:var(--card);border:1px solid var(--bd);border-radius:16px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .2s}.clip:hover{border-color:var(--ac)}
+.th{aspect-ratio:16/10;background:var(--bg2) center/cover;position:relative;display:grid;place-items:center;color:var(--mut);font-size:13px}
+.th .n{position:absolute;left:10px;top:10px;background:rgba(8,13,10,.8);border-radius:7px;padding:2px 8px;font-weight:600;font-size:13px}
+.th .sc{position:absolute;right:10px;top:10px;background:var(--ac);color:#04100a;border-radius:7px;padding:2px 8px;font-weight:700;font-size:13px}
+.cb{padding:12px 14px 14px;display:flex;flex-direction:column;gap:8px;flex:1}.cb h3{margin:0;font-size:15px;line-height:1.3}
+.acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+.stages{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:6px}
+.stages li{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;color:var(--mut);background:var(--bg2)}
+.stages li i{width:10px;height:10px;border-radius:50%;border:2px solid var(--bd)}
+.stages li.d{color:var(--tx)}.stages li.d i{background:var(--ac);border-color:var(--ac)}
+.stages li.a{color:var(--tx);background:var(--surf)}.stages li.a i{border-color:var(--ac);border-top-color:transparent;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.stat{display:flex;gap:18px;margin-top:12px}.stat b{display:block;font-size:22px}
+.badge{font-size:12px;padding:2px 9px;border-radius:999px;background:var(--surf);color:var(--mut)}.badge.done{color:var(--ac2)}.badge.failed{color:var(--err)}
+.top{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:16px}
+video{width:100%;max-height:68vh;border-radius:14px;background:#000}
+.ed{display:grid;gap:14px;grid-template-columns:1fr}@media(min-width:760px){.ed{grid-template-columns:1fr 1fr}}
+.lab{display:block;margin:12px 0 6px;color:var(--mut);font-size:13px}
+.pr{display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:12px 14px;margin-bottom:10px;flex-wrap:wrap}.pr .t{flex:1;min-width:160px}
+.sw{position:relative;width:44px;height:26px;background:var(--surf);border-radius:99px;border:1px solid var(--bd);cursor:pointer;flex:none;transition:.2s}.sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:var(--mut);transition:.2s}
+.sw.on{background:rgba(32,217,120,.25);border-color:var(--ac)}.sw.on::after{left:21px;background:var(--ac)}
+.empty{text-align:center;padding:48px 10px;color:var(--mut)}.empty .btn{margin-top:14px}
+@media(max-width:480px){main{padding-inline:12px}.blk{padding:14px}.src img{width:72px}.f{flex-direction:column}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head><body>
+<header><button class="logo" data-a="go" data-v="start"><i></i>AI Clip Maker</button>
+<nav><button data-a="go" data-v="new">Новый проект</button><button data-a="go" data-v="projects">Мои проекты</button></nav></header>
+<main id="app"></main>
+<script>
+const $=s=>document.querySelector(s),app=$('#app');
+const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ls={get:k=>{try{return localStorage.getItem(k)}catch{return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch{}}};
+const P=n=>String(n).padStart(2,'0');
+const fmt=s=>{s=Math.max(0,Math.round(s||0));const h=s/3600|0,m=s%3600/60|0,x=s%60;return(h?h+':'+P(m):m)+':'+P(x)};
+const parseT=v=>{v=String(v).trim().split(':').map(Number);if(v.some(isNaN))return NaN;return v.reduce((a,b)=>a*60+b,0)};
+async function api(p,o){let r;try{r=await fetch('/api'+p,o)}catch{throw new Error('Сервер недоступен: страница не получает ответов от /api. Подключите backend (контракт описан в начале файла).')}
+ if(!r.ok){let j={};try{j=await r.json()}catch{}throw new Error(j.error||(r.status==404?'Backend не найден (404). Подключите API по контракту из начала файла.':'Ошибка сервера '+r.status))}
+ return r.status==204?null:r.json()}
+const J=b=>({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+const S={url:'',source:null,count:5,duration:'auto',format:'9:16',quality:'1080',moments:'best',showSubs:false,msg:'',ok:false,up:-1,
+ subs:{on:true,srcLang:'auto',lang:'ru',size:'M',font:'Onest',color:'#F2F7F3',outline:true,pos:'bottom',anim:'pop',highlight:true,style:'classic'}};
+const PRESETS={classic:{size:'M',font:'Onest',color:'#F2F7F3',outline:true,anim:'none',highlight:false},bold:{size:'L',font:'Impact',color:'#FFFFFF',outline:true,anim:'pop',highlight:true},karaoke:{size:'L',font:'Onest',color:'#20D978',outline:true,anim:'word',highlight:true},minimal:{size:'S',font:'Onest',color:'#F2F7F3',outline:false,anim:'fade',highlight:false}};
+let es=null,poll=null;
+const stop=()=>{if(es){es.close();es=null}clearInterval(poll)};
+const R={};function go(n){location.hash=n}
+function route(){stop();const n=location.hash.slice(1)||'start';(R[n]||R.start)();app.classList.remove('in');void app.offsetWidth;app.classList.add('in');scrollTo(0,0);
+ document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v==n))}
+addEventListener('hashchange',route);
 
+/* ---------- start ---------- */
+R.start=()=>{app.innerHTML=`<section class="hero"><h1>Превращай длинные видео в короткие клипы</h1>
+<p>Загрузите видео или вставьте ссылку. ИИ найдёт законченные интересные моменты и вырежет каждый в отдельный MP4.</p>
+<button class="btn big" data-a="go" data-v="new">Начать создание</button>
+<div class="strip" aria-hidden="true">${[0,1,2,3,4].map(i=>`<b style="--i:${i};flex:${[3,2,4,2,3][i]}"></b>`).join('')}</div>
+<p class="sm mut" style="margin-top:14px">5 клипов в настройках — 5 независимых файлов, а не один ролик.</p></section>`};
+
+/* ---------- new project ---------- */
+const chips=(k,items,cls='')=>`<div class="row">${items.map(([v,l,dis])=>`<button class="chip ${cls} ${String(S[k])===String(v)?'on':''}" ${dis?'disabled title="Выше разрешения исходника"':''} data-a="set" data-k="${k}" data-v="${v}">${l}</button>`).join('')}</div>`;
+const sel=(k,items)=>`<select data-a="sub" data-k="${k}">${items.map(([v,l])=>`<option value="${v}" ${S.subs[k]==v?'selected':''}>${l}</option>`).join('')}</select>`;
+const LANG=[['auto','Определить автоматически'],['ru','Русский'],['en','English'],['es','Español'],['de','Deutsch'],['fr','Français']];
+R.new=()=>{const h=S.source?.height,q=[['720','720p',0],['1080','1080p',h&&h<1080],['1440','1440p',h&&h<1440],['2160','4K',h&&h<2160]];
+ const sb=S.subs;
+ app.innerHTML=`<h1 style="font-size:28px">Новый проект</h1>
+<div class="blk"><div class="hd"><em>1</em><h2>Источник видео</h2></div>
+<div class="f"><input type="url" id="url" placeholder="Ссылка на YouTube" value="${E(S.url)}" inputmode="url" autocomplete="off"><button class="btn g" data-a="check">Подтвердить</button></div>
+<div class="sm mut" style="margin:10px 0">или</div>
+<label class="btn g s" style="cursor:pointer">Загрузить свой файл<input type="file" id="file" accept="video/*" hidden></label>
+${S.up>=0?`<div class="bar"><i style="width:${S.up}%"></i></div><div class="sm mut">Загрузка ${S.up}%</div>`:''}
+${S.msg?`<div class="msg ${S.ok?'ok':''}">${E(S.msg)}</div>`:''}
+${S.source?`<div class="src">${S.source.thumbnail?`<img src="${E(S.source.thumbnail)}" alt="">`:''}<div><b>${E(S.source.title)}</b><div class="sm mut">${[S.source.duration&&fmt(S.source.duration),S.source.width&&S.source.width+'×'+S.source.height].filter(Boolean).join(', ')}</div></div></div>`:''}
+<p class="sm mut" style="margin:10px 0 0">Только материалы, которые вы вправе обрабатывать. Если извлечь видео по ссылке нельзя, загрузите файл.</p></div>
+<div class="blk"><div class="hd"><em>2</em><h2>Количество клипов</h2></div>${chips('count',[1,2,3,4,5,6,7,8,9,10,12,15].map(n=>[n,n]),'num')}</div>
+<div class="blk"><div class="hd"><em>3</em><h2>Длительность</h2></div>${chips('duration',[['auto','Автоматическая'],['15-30','15–30 с'],['30-60','30–60 с'],['60-90','60–90 с'],['90-180','90–180 с']])}</div>
+<div class="blk"><div class="hd"><em>4</em><h2>Формат</h2></div>${chips('format',[['9:16','Вертикальный 9:16'],['1:1','Квадрат 1:1'],['16:9','Горизонтальный 16:9']])}</div>
+<div class="blk"><div class="hd"><em>5</em><h2>Качество</h2></div>${chips('quality',q)}
+<p class="sm mut" style="margin:10px 0 0">${h?`Исходник: ${h}p. Выше этого разрешение не поднимается.`:'Если выбрать больше, чем есть в исходнике или разрешено на сервере, сервис ограничит и предупредит.'}</p></div>
+<div class="blk"><div class="hd"><em>6</em><h2>Субтитры</h2><button class="sw ${sb.on?'on':''}" style="margin-left:auto" role="switch" aria-checked="${sb.on}" aria-label="Субтитры" data-a="subon"></button></div>
+${sb.on?`<div class="row" style="margin-bottom:12px">${Object.keys(PRESETS).map(p=>`<button class="chip ${sb.style==p?'on':''}" data-a="preset" data-v="${p}">${{classic:'Классика',bold:'Крупные',karaoke:'Караоке',minimal:'Минимал'}[p]}</button>`).join('')}
+<button class="chip" data-a="more">${S.showSubs?'Скрыть настройки':'Настроить'}</button></div>
+${S.showSubs?`<div class="ed"><div><span class="lab">Язык распознавания</span>${sel('srcLang',LANG)}<span class="lab">Язык отображения</span>${sel('lang',LANG.slice(1))}<span class="lab">Размер</span>${sel('size',[['S','Маленький'],['M','Средний'],['L','Крупный']])}<span class="lab">Шрифт</span>${sel('font',[['Onest','Onest'],['Impact','Impact'],['Arial','Arial'],['Georgia','Georgia']])}</div>
+<div><span class="lab">Цвет</span><input type="color" data-a="sub" data-k="color" value="${sb.color}" style="width:100%;height:42px;background:none;border:1px solid var(--bd);border-radius:10px"><span class="lab">Расположение</span>${sel('pos',[['bottom','Снизу'],['center','По центру'],['top','Сверху']])}<span class="lab">Анимация</span>${sel('anim',[['none','Без анимации'],['pop','Появление'],['word','По словам'],['fade','Затухание']])}
+<div class="row" style="margin-top:14px"><button class="chip ${sb.outline?'on':''}" data-a="tog" data-k="outline">Обводка</button><button class="chip ${sb.highlight?'on':''}" data-a="tog" data-k="highlight">Подсветка слов</button></div></div></div>`:''}`:'<span class="sm mut">Выключены</span>'}</div>
+<div class="blk"><div class="hd"><em>7</em><h2>Какие моменты искать</h2></div>${chips('moments',[['auto','ИИ выбирает сам'],['best','Самые интересные'],['funny','Смешные'],['surprise','Неожиданные'],['emotion','Эмоциональные'],['ideas','Важные мысли'],['tips','Полезные советы'],['debate','Споры'],['mix','Максимально разные']])}</div>
+<button class="btn big" style="width:100%" data-a="create" ${S.source?'':'disabled'}>Создать клипы</button>
+${S.source?'':'<p class="sm mut" style="text-align:center">Сначала подтвердите ссылку или загрузите файл.</p>'}`};
+
+/* ---------- processing ---------- */
+const STG=['Получение видео','Распознавание речи','Анализ содержания','Поиск интересных моментов','Создание клипов','Добавление субтитров','Экспорт'];
+function drawProc(p){const st=p.status,fail=st=='failed',done=st=='done'||st=='partial';
+ app.innerHTML=`<div class="top"><div><h1 style="font-size:26px;margin:0">${E(p.title||'Проект')}</h1><div class="sm mut">${E(p.source?.title||'')}</div></div><span class="badge ${done?'done':fail?'failed':''}">${{queued:'В очереди',running:'Обработка',done:'Готово',partial:'Готово частично',failed:'Ошибка'}[st]||E(st)}</span></div>
+<div class="blk"><div class="sm mut">Общий прогресс</div><div style="font-size:30px;font-weight:700">${Math.round(p.progress||0)}%</div><div class="bar"><i style="width:${p.progress||0}%"></i></div>
+<div class="stat"><div><b>${p.ready??0}</b><span class="sm mut">готово</span></div><div><b>${Math.max(0,(p.total||0)-(p.ready||0))}</b><span class="sm mut">осталось</span></div></div>
+<ul class="stages">${STG.map((s,i)=>`<li class="${done||i+1<p.stage?'d':i+1==p.stage&&!fail?'a':''}"><i></i>${s}</li>`).join('')}</ul></div>
+${p.notice?`<div class="blk sm" style="border-color:var(--ac)">${E(p.notice)}</div>`:''}
+${fail?`<div class="blk"><div class="msg" style="margin:0 0 12px">${E(p.error||'Обработка не удалась')}</div><button class="btn" data-a="retry" data-v="${p.id}">Повторить</button></div>`:''}
+${done?`<button class="btn big" data-a="go" data-v="results">Открыть клипы</button>`:''}`}
+R.processing=async()=>{const id=ls.get('acm.pid');if(!id){go('new');return}
+ app.innerHTML='<div class="empty">Загружаем состояние проекта…</div>';
+ const on=p=>{if(location.hash!='#processing')return;drawProc(p);if(p.status=='done'||p.status=='partial'||p.status=='failed')stop()};
+ try{on(await api('/projects/'+id))}catch(e){app.innerHTML=`<div class="blk"><div class="msg" style="margin:0">${E(e.message)}</div></div>`;return}
+ if(location.hash!='#processing')return;
+ const fb=()=>{clearInterval(poll);poll=setInterval(()=>api('/projects/'+id).then(on).catch(()=>{}),3000)};
+ if(window.EventSource){es=new EventSource('/api/projects/'+id+'/events');es.onmessage=m=>{try{on(JSON.parse(m.data))}catch{}};es.onerror=()=>{es&&es.close();es=null;fb()}}else fb()};
+
+/* ---------- results ---------- */
+const cardHtml=c=>`<article class="clip"><div class="th" style="${c.status=='ready'?`background-image:url('/api/clips/${E(c.id)}/thumb')`:''}"><span class="n">#${P(c.index)}</span>${c.status=='ready'?`<span class="sc" title="Внутренняя оценка алгоритма, не прогноз вирусности">${Math.round(c.score)}</span>`:c.status=='failed'?'Не удалось создать':'Создаётся…'}</div>
+<div class="cb"><h3>${E(c.title)}</h3><div class="sm mut">${fmt(c.duration)} · в исходнике ${fmt(c.start)}–${fmt(c.end)}</div>${c.error?`<div class="msg" style="margin:0">${E(c.error)}</div>`:''}
+<div class="acts">${c.status=='ready'?`<button class="btn s" data-a="open" data-v="${E(c.id)}">Смотреть</button><a class="btn g s" href="/api/clips/${E(c.id)}/file" download="clip_${P(c.index)}.mp4">Скачать</a><button class="btn g s" data-a="open" data-v="${E(c.id)}">Изменить</button>`:''}<button class="btn g s" data-a="delclip" data-v="${E(c.id)}">Удалить</button></div></div></article>`;
+R.results=async()=>{const id=ls.get('acm.pid');if(!id){go('projects');return}
+ app.innerHTML='<div class="empty">Загрузка…</div>';let p;
+ try{p=await api('/projects/'+id)}catch(e){app.innerHTML=`<div class="blk"><div class="msg" style="margin:0">${E(e.message)}</div></div>`;return}
+ const ok=(p.clips||[]).filter(c=>c.status=='ready').length;
+ app.innerHTML=`<div class="top"><div><h1 style="font-size:26px;margin:0">${E(p.title)}</h1><div class="sm mut">Готово клипов: ${ok} из ${p.total??p.clips?.length??0}</div></div>${ok?`<a class="btn" href="/api/projects/${E(id)}/zip" download>Скачать все (ZIP)</a>`:''}</div>
+${p.notice?`<div class="blk sm" style="border-color:var(--ac)">${E(p.notice)}</div>`:''}
+${p.clips?.length?`<div class="grid">${p.clips.map(cardHtml).join('')}</div>`:'<div class="empty">Клипов нет.<br><button class="btn" data-a="go" data-v="new">Новый проект</button></div>'}`};
+
+/* ---------- single clip: player + editor ---------- */
+R.clip=async()=>{const cid=ls.get('acm.cid');if(!cid){go('results');return}
+ app.innerHTML='<div class="empty">Загрузка…</div>';let c;
+ try{c=await api('/clips/'+cid)}catch(e){app.innerHTML=`<div class="blk"><div class="msg" style="margin:0">${E(e.message)}</div></div>`;return}
+ S.ed={start:c.start,end:c.end,format:c.format||'9:16',subs:!!c.subs,crop:'auto'};
+ const draw=c=>{app.innerHTML=`<div class="top"><button class="btn g s" data-a="go" data-v="results">К клипам</button><a class="btn s" href="/api/clips/${E(c.id)}/file" download="clip_${P(c.index)}.mp4">Скачать</a></div>
+<div class="ed"><div><video controls playsinline preload="metadata" src="/api/clips/${E(c.id)}/file?v=${Date.now()}"></video><h2 style="margin-top:10px">${E(c.title)}</h2><div class="sm mut">Оценка ИИ: ${Math.round(c.score)} (внутренняя оценка алгоритма)</div></div>
+<div class="blk"><h2>Редактор</h2><span class="lab">Начало в исходном видео (м:сс)</span><input type="text" id="es" value="${fmt(S.ed.start)}"><span class="lab">Конец (м:сс)</span><input type="text" id="ee" value="${fmt(S.ed.end)}">
+<span class="lab">Формат</span><div class="row">${[['9:16','9:16'],['1:1','1:1'],['16:9','16:9']].map(([v,l])=>`<button class="chip ${S.ed.format==v?'on':''}" data-a="ed" data-k="format" data-v="${v}">${l}</button>`).join('')}</div>
+<span class="lab">Кадрирование</span><div class="row">${[['auto','Лицо / автоматически'],['center','По центру'],['left','Слева'],['right','Справа']].map(([v,l])=>`<button class="chip ${S.ed.crop==v?'on':''}" data-a="ed" data-k="crop" data-v="${v}">${l}</button>`).join('')}</div>
+<div class="row" style="margin:14px 0;align-items:center"><button class="sw ${S.ed.subs?'on':''}" role="switch" aria-checked="${S.ed.subs}" aria-label="Субтитры" data-a="ed" data-k="subs" data-v="${!S.ed.subs}"></button><span>Субтитры</span></div>
+<button class="btn" style="width:100%" data-a="export" data-v="${E(c.id)}" ${c.status=='processing'?'disabled':''}>${c.status=='processing'?'Экспорт идёт…':'Экспортировать заново'}</button><div class="msg" id="em" style="display:none"></div></div></div>`;
+  if(c.status=='processing'){clearInterval(poll);poll=setInterval(async()=>{try{const n=await api('/clips/'+c.id);if(n.status!='processing'){clearInterval(poll);if(location.hash=='#clip')draw(n)}}catch{}},2000)}};
+ draw(c)};
+
+/* ---------- projects ---------- */
+R.projects=async()=>{app.innerHTML='<div class="empty">Загрузка…</div>';let l;
+ try{l=await api('/projects')}catch(e){app.innerHTML=`<h1 style="font-size:28px">Мои проекты</h1><div class="blk"><div class="msg" style="margin:0">${E(e.message)}</div></div>`;return}
+ app.innerHTML=`<h1 style="font-size:28px">Мои проекты</h1>${l.length?l.map(p=>`<div class="pr"><div class="t"><b>${E(p.title)}</b><div class="sm mut">${new Date(p.createdAt).toLocaleDateString('ru-RU')} · клипов: ${p.clipCount??0}</div></div><span class="badge ${p.status=='done'?'done':p.status=='failed'?'failed':''}">${{queued:'В очереди',running:'Обработка',done:'Готово',partial:'Частично',failed:'Ошибка'}[p.status]||E(p.status)}</span>
+<button class="btn s" data-a="openp" data-v="${E(p.id)}" data-s="${E(p.status)}">Открыть</button><button class="btn g s" data-a="retry" data-v="${E(p.id)}">Повторить</button><button class="btn g s" data-a="delp" data-v="${E(p.id)}">Удалить</button></div>`).join(''):'<div class="empty">Проектов пока нет.<br><button class="btn" data-a="go" data-v="new">Создать первый</button></div>'}`};
+
+/* ---------- actions ---------- */
+function msg(t,ok){S.msg=t;S.ok=!!ok;R.new()}
+const arm=(b,t)=>{if(b.dataset.arm)return true;b.dataset.arm=1;const o=b.textContent;b.textContent=t;b.classList.add('arm');setTimeout(()=>{delete b.dataset.arm;b.textContent=o;b.classList.remove('arm')},3000);return false};
+const YT=/^(https?:\/\/)?(www\.|m\.)?(youtube\.com\/(watch\?(.*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)[\w-]{11}/;
+const A={
+ go:b=>go(b.dataset.v),
+ set:b=>{S[b.dataset.k]=b.dataset.k=='count'?+b.dataset.v:b.dataset.v;R.new()},
+ subon:()=>{S.subs.on=!S.subs.on;R.new()},more:()=>{S.showSubs=!S.showSubs;R.new()},
+ preset:b=>{Object.assign(S.subs,PRESETS[b.dataset.v],{style:b.dataset.v});R.new()},
+ tog:b=>{S.subs[b.dataset.k]=!S.subs[b.dataset.k];R.new()},
+ ed:b=>{const k=b.dataset.k;S.ed[k]=k=='subs'?b.dataset.v=='true':b.dataset.v;S.ed.start=parseT($('#es').value);S.ed.end=parseT($('#ee').value);const c=ls.get('acm.cid');
+  const v=app.querySelectorAll('.chip,.sw');b.classList.toggle('on');if(k!='subs')b.parentNode.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===b));else{b.dataset.v=String(!S.ed.subs);b.classList.toggle('on',S.ed.subs);b.setAttribute('aria-checked',S.ed.subs)}},
+ check:async()=>{S.url=$('#url').value.trim();if(!YT.test(S.url))return msg('Введите ссылку вида youtube.com/watch?v=… или youtu.be/…');
+  msg('Проверяем ссылку…',1);try{S.source=await api('/sources',J({url:S.url}));msg('Источник подтверждён',1)}catch(e){S.source=null;msg(e.message+' Можно загрузить файл вручную.')}},
+ create:async()=>{try{const sb=S.subs;const r=await api('/projects',J({sourceId:S.source.id,count:S.count,duration:S.duration,format:S.format,quality:+S.quality,moments:S.moments,subs:sb}));ls.set('acm.pid',r.id);go('processing')}catch(e){msg(e.message)}},
+ retry:async b=>{try{await api('/projects/'+b.dataset.v+'/retry',{method:'POST'});ls.set('acm.pid',b.dataset.v);go('processing');if(location.hash=='#processing')R.processing()}catch(e){alert(e.message)}},
+ open:b=>{ls.set('acm.cid',b.dataset.v);go('clip')},
+ openp:b=>{ls.set('acm.pid',b.dataset.v);go(b.dataset.s=='done'||b.dataset.s=='partial'?'results':'processing')},
+ delclip:async b=>{if(!arm(b,'Удалить?'))return;try{await api('/clips/'+b.dataset.v,{method:'DELETE'});R.results()}catch(e){b.textContent=e.message}},
+ delp:async b=>{if(!arm(b,'Удалить?'))return;try{await api('/projects/'+b.dataset.v,{method:'DELETE'});if(ls.get('acm.pid')==b.dataset.v)ls.set('acm.pid','');R.projects()}catch(e){b.textContent=e.message}},
+ export:async b=>{const s=parseT($('#es').value),e=parseT($('#ee').value),m=$('#em');m.style.display='block';
+  if(isNaN(s)||isNaN(e)||e-s<1){m.textContent='Проверьте время: конец должен быть позже начала.';return}
+  try{await api('/clips/'+b.dataset.v+'/export',J({start:s,end:e,format:S.ed.format,subs:S.ed.subs,crop:S.ed.crop}));R.clip()}catch(x){m.textContent=x.message}}
+};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(!b||b.tagName=='SELECT'||b.tagName=='INPUT')return;if(A[b.dataset.a])A[b.dataset.a](b)});
+document.addEventListener('change',e=>{const t=e.target;
+ if(t.dataset.a=='sub'){S.subs[t.dataset.k]=t.value;S.subs.style='';if(t.type!='color')R.new()}
+ if(t.id=='file'&&t.files[0]){const f=t.files[0];S.up=0;S.msg='';S.source=null;R.new();
+  const x=new XMLHttpRequest();x.open('POST','/api/uploads?name='+encodeURIComponent(f.name));x.setRequestHeader('Content-Type',f.type||'application/octet-stream');x.upload.onprogress=ev=>{if(ev.lengthComputable){S.up=Math.round(ev.loaded/ev.total*100);const i=$('.bar i');if(i)i.style.width=S.up+'%'}};
+  x.onload=()=>{S.up=-1;let j={};try{j=JSON.parse(x.responseText)}catch{}if(x.status<300&&j.id){S.source=j;msg('Файл загружен',1)}else msg(j.error||(x.status==404?'Backend не найден (404). Подключите API по контракту из начала файла.':'Ошибка загрузки '+x.status))};
+  x.onerror=()=>{S.up=-1;msg('Сервер недоступен: загрузка не выполнена.')};x.send(f)}});
+route();
+</script></body></html>
